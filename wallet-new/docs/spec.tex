@@ -107,7 +107,7 @@ or does.
 
 \begin{figure}
 
-\emph{Sets with no further structure}
+\emph{Primitive types}
 %
 \begin{equation*}
 \begin{array}{r@{~\in~}lr}
@@ -129,7 +129,7 @@ or does.
 \end{array}
 \end{equation*}
 %
-\emph{Types}
+\emph{Derived types}
 %
 \begin{equation*}
 \begin{array}{r@{~\in~}l@{\qquad=\qquad}r@{~\in~}lr}
@@ -2190,16 +2190,21 @@ from the state of the wallet proper.
 
 The static information ($\mathsf{TxMeta}$) is the most straight-forward.
 This includes
-
+%
 \begin{itemize}
 \item transaction ID
 \item total amount
 \item inputs and outputs (both in terms of addresses)
-\item whether the transaction is ``local'' or not (meaning it is from and to
-addresses owned by the wallet)
-\item the transaction direction (incoming or outgoing)
+\item whether the transaction is ``local'' or not
+(\emph{all} input and output addresses are owned by the wallet)
 \item the transaction creation time
+(as a timestamp in microseconds, not as a slot number)
+\item the transaction direction (incoming or outgoing)
 \end{itemize}
+%
+For the final classification (incoming or outgoing), we can mark a
+transaction as outgoing when it is introduced by $\mathsf{newPending}$,
+and incoming otherwise.
 
 \subsubsection{Information dependent on chain status}
 \label{sec:confirmations}
@@ -2261,6 +2266,13 @@ transactions, the right shows incoming transactions. The empty circle at the top
 of the diagram means that the transaction is not included in the wallet's
 reported history.
 
+As is clear from this diagram, incoming transactions that get rolled back are
+not currently assigned any status, and are simply excluded from the wallet's
+history. The metadata about these transactions however is \emph{not}  removed
+from $\mathit{txInfo}$. After all, it can still be useful in order to be able to
+provide the wallet's user with information about the expected UTxO (a feature
+that the current wallet does not have).
+
 \begin{figure}
 \begin{tikzpicture}[->,>=stealth',shorten >=1pt,auto,node distance=2cm,
   thick,main node/.style={rectangle,fill=blue!20,draw,minimum size=1mm}]
@@ -2307,28 +2319,42 @@ reported history.
 \caption{\label{fig:transaction_state}Transaction state transitions (outgoing, \emph{left}, and incoming, \emph{right})}
 \end{figure}
 
-\section{Transaction resubmission and cancellation}
+\section{Transaction Submission}
+
+\subsection{Abstract model}
 
 An actual implementation of the wallet needs to broadcast pending transactions
 to the network, monitor when they get included in the blockchain, re-submit them
 if they don't get included, and perhaps eventually decide to give up on them if
-for some reason they do not get included.
+for some reason they do not get included. This functionality does not need to be
+part of the wallet proper; instead we model it abstractly as shown in
+Figure~\ref{fig:transaction_submission_layer}. Just like the wallet expects to
+be notified of events such as `new block arrived', `user submitted a new
+transaction', the submission layer expects to be notified when the set of
+pending transactions grows or shrinks.
 
-The (re)submission layer can use a (priority) queue that for each time slot
-records which transactions may need to be resubmitted. Each time a transaction
-gets submitted in slot $n$, a resubmission gets scheduled for slot $n + l$ for
-some constant $l$. When slot $n + l$ comes, the resubmission logic checks if the
-transaction is still in the wallet's pending set, and if so, repeat the process.
-This resubmission state can be kept separate from the core wallet state (meaning
-that there is no need for some kind of consistency between the two states).
+\begin{figure}
+\begin{align*}
+\mathsf{addPending} & :: \mathbb{P}(\mathsf{Tx}) \rightarrow \mathsf{Submission} \rightarrow \mathsf{Submission} \\
+\mathsf{remPending} & :: \mathbb{P}(\mathsf{Tx}) \rightarrow \mathsf{Submission} \rightarrow \mathsf{Submission} \\
+\mathsf{tick}       & :: \mathsf{Submission} \rightarrow (\mathbb{P}(\mathsf{Tx}), \mathsf{Submission})
+\end{align*}
+\caption{\label{fig:transaction_submission_layer}Transaction submission layer}
+\end{figure}
 
-After a rollback the resubmission layer needs to figure out which transactions
-have become pending again, and start the resubmission process afresh. This
-could possibly be faciliated by a callback from the core wallet layer.
+The wallet should
+%
+\begin{itemize}
+\item call $\mathsf{addPending}$ on $\mathsf{newPending}$ and (possibly) on $\mathsf{rollback}$
+\item call $\mathsf{remPending}$ on $\mathsf{applyBlock}$ and $\mathsf{cancel}$
+\end{itemize}
 
-When the resubmission layer wants to give up on a transaction, it should
-remove it from $\mathit{pending}$. From the point of view of the model
-this corresponds to a new function
+In addition there must be a thread that periodically calls $\mathsf{tick}$, to
+give the submission layer a chance to resubmit transactions that haven't made it
+into the blockchain yet. The set of transactions returned by $\mathsf{tick}$ are
+the transactions that the submission layer gave up on (see below); the wallet
+should remove such transactions from its $\mathit{pending}$ set. From the point
+of view of the wallet model this corresponds to a new function
 %
 \begin{align*}
 & \mathsf{cancel} :: \mathsf{Tx} \rightarrow \mathsf{Wallet} \rightarrow \mathsf{Wallet} \\
@@ -2336,16 +2362,154 @@ this corresponds to a new function
 & \qquad \text{where} ~ \mathsf{cancel}' ~ (\mathit{utxo}, \mathit{pending}, \mathit{blockMeta}) = (\mathit{utxo}, \mathit{pending} \setminus \{ \mathit{tx} \}, \mathit{blockMeta})
 \end{align*}
 %
-Note that the logic of Section~\ref{sec:transaction_status} means that such
-a transaction would then be reported as $\mathtt{WontApply}$. Since we
-removed the transaction from the $\mathit{pending}$ set in all checkpoints
-however a rollback won't reintroduce it into $\mathit{pending}$; if the user
-wants to explicitly tell the wallet to try this transaction again they will
-need to call $\mathsf{newPending}$. Effectively, $\mathsf{cancel}$ becomes a
-secondary way in which a transaction may go from $\texttt{Applying}$ to
-$\texttt{WontApply}$ (arrow $\mathsf{applyBlock}^*$), and $\mathsf{newPending}$
-a secondary way to get back from $\texttt{WontApply}$ to $\texttt{Applying}$
-(arrow $\mathsf{rollback}^*$).
+By the logic of Section~\ref{sec:transaction_status}, such a transaction would
+be reported as $\mathtt{WontApply}$. Since we removed the transaction from the
+$\mathit{pending}$ set in all checkpoints, however, a rollback won't reintroduce
+it into $\mathit{pending}$; if the user wants to explicitly tell the wallet to
+try this transaction again they will need to call $\mathsf{newPending}$.
+Effectively, $\mathsf{cancel}$ becomes a secondary way in which a transaction
+may go from $\texttt{Applying}$ to $\texttt{WontApply}$ (arrow
+$\mathsf{applyBlock}^*$), and $\mathsf{newPending}$ a secondary way to get back
+from $\texttt{WontApply}$ to $\texttt{Applying}$ (arrow $\mathsf{rollback}^*$).
+
+\subsection{Implementation}
+
+In this section we give a simple implementation of the submission layer, shown
+in Figure~\ref{fig:submission_layer_impl}. The primary goal is to show that the
+submission layer has sufficient information and does not need further support
+from the core wallet layer---indeed, does not need to know it exists at all.
+
+The state of the submission layer consists of a mirror copy of the pending set
+of the wallet and a schedule of which transactions to (re)submit next. The
+schedule is modelled as a simple list of time slots, recording for each slot the
+transactions that should be submitted along with a submission count for each
+transaction.
+%
+\begin{itemize}
+\item When the submission layer is notified of new pending transactions,
+it adds those to its $\mathit{pending}$ set and schedules them to be submitted
+in the next slot, recording a initial submission count of 0.
+\item When the wallet tells the submission layer that some transactions are
+no longer pending (because they have been confirmed, because they have become
+invalid, or for other reasons), the submission layer simply removes them
+from its local $\mathit{pending}$ set.
+\item At the start of each time slot, the submission layer relies on the
+``resubmission parameter'' $\varrho$ to resubmit the set of transactions
+that are due, possibly dropping some transactions that have reached a
+maximum submission count.
+\end{itemize}
+
+Although our model here does not deal with actual networking concerns, a
+typical side-effectful implementation of $\varrho$ would
+%
+\begin{itemize}
+\item Drop any transactions that have reached their maximum submission
+count, possibly notifying the user 
+(note that $\varrho$ only gets called for transactions that are still listed as
+pending).
+\item Resubmit the remainder to the network, and then reschedule them for
+the next attempt later. The submission count can be used to implement an
+exponential back-off if desired.
+\end{itemize}
+
+The concept of time slots is essentially private to the submission layer; it
+can, but does not have to, line up with the underlying blockchain slot length
+(indeed, we don't need to assume that the underlying blockchain even \emph{has}
+a slot length).
+
+In principle $\mathit{pending}$ could be dropped from the submission layer; the
+reason that we don't is that this would mean that $\mathsf{remPending}$ would
+have to traverse the entire schedule to remove the transactions from each slot.
+By keeping a separate $\mathit{pending}$ set we avoid this traversal, only
+checking the pending set at the point where we need it. The wallet's
+$\mathit{pending}$ set and the submission layer's one don't need to be in
+perfect sync:
+%
+\begin{itemize}
+\item If
+\begin{math}
+t \in    \mathit{pending}_\mathsf{Wallet} \text{ but }
+t \notin \mathit{pending}_\mathsf{Submission}
+\end{math}
+(yet), transaction $t$ will just be submitted a little bit later.
+
+\item If
+\begin{math}
+t \notin \mathit{pending}_\mathsf{Wallet} \text{ but (still) }
+t \in    \mathit{pending}_\mathsf{Submission}
+\end{math}
+then (depending on the submission count) the submission layer may resubmit a
+transaction which has already been included in the blockchain, or report the
+transaction as ``dropped''. The former is harmless; the latter at worst simply
+confusing. Moreover,  this may happen even if the wallet and the submission
+layer \emph{are} synchronized: it's entirely possible that the transaction has
+been included in the blockchain but the wallet hasn't been informed of the block
+yet.
+\end{itemize}
+
+Although the specification uses a simple list for its schedule, if the overhead
+of a linear scan to reschedule transactions is unacceptable it can of course
+easily use different datatype (such as a fingertree).
+
+\begin{figure}
+%
+\emph{Types}
+%
+\begin{align*}
+  \mathit{schedule}
+& \in \mathsf{Schedule} = [\mathsf{Tx} \mapsto \mathbb{N}]
+\end{align*}
+%
+\emph{Parameters}
+%
+\begin{align*}
+  \varrho
+& \in (\mathsf{Tx} \mapsto \mathbb{N}) \times \mathsf{Schedule} \rightarrow \mathbb{P}(\mathsf{Tx}) \times \mathsf{Schedule} & \text{Resubmission}
+\end{align*}
+%
+\emph{State}
+%
+\begin{align*}
+  (\mathit{pending}, \mathit{schedule})
+& \in \mathsf{Submission} = \mathsf{Pending} \times \mathsf{Schedule}
+\end{align*}
+%
+\emph{Updates}
+%
+\begin{align*}
+  \mathsf{addPending}
+    ~ \mathit{txs}
+    ~ (\mathit{pending}, \mathit{schedule})
+& = ( \mathit{pending} \cup \mathit{txs}
+    , \{ \mathit{tx} \mapsto 0 \mid \mathit{tx} \in \mathit{txs} \} : \mathit{schedule}
+    )
+\\
+  \mathsf{remPending}
+    ~ \mathit{txs}
+    ~ (\mathit{pending}, \mathit{schedule})
+& = ( \mathit{pending} \setminus \mathit{txs}
+    , \mathit{schedule}
+    )
+\end{align*}
+\begin{align*}
+& \mathsf{tick} ~ (\mathit{pending}, []) = (\emptyset, (\mathit{pending}, [])) \\
+& \mathsf{tick} ~ (\mathit{pending}, \mathit{due} : \mathit{schedule})
+= (\mathit{dropped}, (\mathit{pending}, \mathit{schedule'})) \\
+& \qquad\text{where~} (\mathit{dropped}, \mathit{schedule}')
+= \rho(\mathit{pending} \restrictdom \mathit{due}, \mathit{schedule})
+\end{align*}
+%
+\caption{\label{fig:submission_layer_impl}Submission layer implementation (sketch)}
+\end{figure}
+
+
+
+
+
+
+
+\section{Transaction resubmission and cancellation (OLD)}
+
 
 \paragraph{Note.} Of course, once a transaction has been broadcast, cancelling
 it locally does not mean the transaction won't be included anymore. This can
