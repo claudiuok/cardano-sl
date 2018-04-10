@@ -273,6 +273,8 @@ instance Bi Nano where
     encode (MkFixed resolution) = encode resolution
     decode = MkFixed <$> decode
 
+    encodedSize (MkFixed i) = encodedSize i
+
 instance Bi Void where
     decode = cborError "instance Bi Void: you shouldn't try to deserialize Void"
     encode = absurd
