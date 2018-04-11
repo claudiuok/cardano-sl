@@ -413,14 +413,16 @@ instance Bi a => Bi (Maybe a) where
 
     encodedSize x = 1 + maybe 0 encodedSize x
 
-encodeContainerSkel :: (Word -> E.Encoding)
-                    -> (container -> Int)
-                    -> (accumFunc -> E.Encoding -> container -> E.Encoding)
-                    -> accumFunc
-                    -> container
-                    -> E.Encoding
-encodeContainerSkel encodeLen size foldFunction f  c =
-    encodeLen (fromIntegral (size c)) <> foldFunction f mempty c
+encodeContainerSkel
+    :: Monoid a
+    => (Word -> a)
+    -> (container -> Word)
+    -> (accumFunc -> a -> container -> a)
+    -> accumFunc
+    -> container
+    -> a
+encodeContainerSkel encodeLen size foldrFunction f  c =
+    encodeLen (size c) `mappend` foldrFunction f mempty c
 {-# INLINE encodeContainerSkel #-}
 
 decodeContainerSkelWithReplicate
@@ -462,10 +464,24 @@ encodeMapSkel :: (Bi k, Bi v)
 encodeMapSkel size foldrWithKey =
   encodeContainerSkel
     E.encodeMapLen
-    size
+    (fromIntegral . size)
     foldrWithKey
     (\k v b -> encode k <> encode v <> b)
 {-# INLINE encodeMapSkel #-}
+
+encodedSizeMapSkel
+    :: forall k v m. (Bi k, Bi v)
+    => (m -> Int)
+    -> ((k -> v -> Sum Byte -> Sum Byte) -> Sum Byte -> m -> Sum Byte)
+    -> m
+    -> Byte
+encodedSizeMapSkel size foldrWithKey =
+    getSum . encodeContainerSkel
+        (\s -> Sum $ withSize s 1 2 3 5 9)
+        (fromIntegral . size)
+        foldrWithKey
+        (\k v b -> Sum (encodedSize k) `mappend` Sum (encodedSize v) `mappend` b)
+{-# INLINE encodedSizeMapSkel #-}
 
 -- | Checks canonicity by comparing the new key being decoded with
 -- the previous one, to enfore these are sorted the correct way.
@@ -509,19 +525,37 @@ instance (Hashable k, Ord k, Bi k, Bi v) => Bi (HM.HashMap k v) where
         foldr (uncurry f) acc . sortWith fst . HM.toList
     decode = decodeMapSkel HM.fromList
 
+    encodedSize = encodedSizeMapSkel HM.size $ \f acc ->
+        foldr (uncurry f) acc . HM.toList
+
 instance (Ord k, Bi k, Bi v) => Bi (Map k v) where
     encode = encodeMapSkel M.size M.foldrWithKey
     decode = decodeMapSkel M.fromDistinctAscList
+    encodedSize = encodedSizeMapSkel M.size M.foldrWithKey
 
 encodeSetSkel :: Bi a
               => (s -> Int)
               -> ((a -> E.Encoding -> E.Encoding) -> E.Encoding -> s -> E.Encoding)
               -> s
               -> E.Encoding
-encodeSetSkel size foldFunction =
+encodeSetSkel size foldrFunction =
     mappend encodeSetTag .
-    encodeContainerSkel E.encodeListLen size foldFunction (\a b -> encode a <> b)
+    encodeContainerSkel E.encodeListLen (fromIntegral . size) foldrFunction (\a b -> encode a <> b)
 {-# INLINE encodeSetSkel #-}
+
+encodedSizeSetSkel
+    :: Bi a
+    => (s -> Int)
+    -> ((a -> Sum Byte -> Sum Byte) -> Sum Byte -> s -> Sum Byte)
+    -> s
+    -> Byte
+encodedSizeSetSkel size foldrFunction =
+    getSum . mappend (Sum 1) . encodeContainerSkel
+        (\s -> Sum $ withSize s 1 2 3 5 9)
+        (fromIntegral . size)
+        foldrFunction
+        (\a b -> Sum (encodedSize a) `mappend` b)
+{-# INLINE encodedSizeSetSkel #-}
 
 -- We stitch a `258` in from of a (Hash)Set, so that tools which
 -- programmatically check for canonicity can recognise it from a normal
@@ -570,9 +604,13 @@ instance (Hashable a, Ord a, Bi a) => Bi (HashSet a) where
         foldr f acc . sort . HS.toList
     decode = decodeSetSkel HS.fromList
 
+    encodedSize = encodedSizeSetSkel HS.size $ \f acc ->
+        foldr f acc . HS.toList
+
 instance (Ord a, Bi a) => Bi (Set a) where
     encode = encodeSetSkel S.size S.foldr
     decode = decodeSetSkel S.fromDistinctAscList
+    encodedSize = encodedSizeSetSkel S.size S.foldr
 
 -- | Generic encoder for vectors. Its intended use is to allow easy
 -- definition of 'Serialise' instances for custom vector
@@ -580,10 +618,20 @@ encodeVector :: (Bi a, Vector.Generic.Vector v a)
              => v a -> E.Encoding
 encodeVector = encodeContainerSkel
     E.encodeListLen
-    Vector.Generic.length
+    (fromIntegral . Vector.Generic.length)
     Vector.Generic.foldr
     (\a b -> encode a <> b)
 {-# INLINE encodeVector #-}
+
+encodedSizeVector :: (Bi a, Vector.Generic.Vector v a)
+                  => v a -> Byte
+encodedSizeVector =
+    getSum . mappend (Sum 1) . encodeContainerSkel
+        (\s -> Sum $ withSize s 1 2 3 5 9)
+        (fromIntegral . Vector.Generic.length)
+        Vector.Generic.foldr
+        (\a b -> Sum (encodedSize a) `mappend` b)
+{-# INLINE encodedSizeVector #-}
 
 -- | Generic decoder for vectors. Its intended use is to allow easy
 -- definition of 'Serialise' instances for custom vector
@@ -600,6 +648,8 @@ instance (Bi a) => Bi (Vector.Vector a) where
   {-# INLINE encode #-}
   decode = decodeVector
   {-# INLINE decode #-}
+  encodedSize = encodedSizeVector
+  {-# INLINE encodedSize #-}
 
 ----------------------------------------------------------------------------
 -- Other types
@@ -608,14 +658,17 @@ instance (Bi a) => Bi (Vector.Vector a) where
 instance Bi Millisecond where
     encode = encode . toInteger
     decode = fromInteger <$> decode
+    encodedSize = encodedSize . toInteger
 
 instance Bi Microsecond where
     encode = encode . toInteger
     decode = fromInteger <$> decode
+    encodedSize = encodedSize . toInteger
 
 instance Bi Byte where
     encode = encode . toBytes
     decode = fromBytes <$> decode
+    encodedSize = encodedSize . toBytes
 
 ----------------------------------------------------------------------------
 -- Generic deriving
