@@ -294,6 +294,8 @@ instance (Typeable s, Bi a) => Bi (Tagged s a) where
     encode (Tagged a) = encode a
     decode = Tagged <$> decode
 
+    encodedSize (Tagged a) = encodedSize a
+
 ----------------------------------------------------------------------------
 -- Containers
 ----------------------------------------------------------------------------
