@@ -309,6 +309,8 @@ instance (Bi a, Bi b) => Bi (a,b) where
                 !y <- decode
                 return (x, y)
 
+    encodedSize (a,b) = 1 + encodedSize a + encodedSize b
+
 instance (Bi a, Bi b, Bi c) => Bi (a,b,c) where
     encode (a,b,c) = E.encodeListLen 3
                   <> encode a
@@ -320,6 +322,8 @@ instance (Bi a, Bi b, Bi c) => Bi (a,b,c) where
                 !y <- decode
                 !z <- decode
                 return (x, y, z)
+
+    encodedSize (a,b,c) = 1 + encodedSize a + encodedSize b + encodedSize c
 
 instance (Bi a, Bi b, Bi c, Bi d) => Bi (a,b,c,d) where
     encode (a,b,c,d) = E.encodeListLen 4
@@ -334,6 +338,8 @@ instance (Bi a, Bi b, Bi c, Bi d) => Bi (a,b,c,d) where
                 !c <- decode
                 !d <- decode
                 return (a, b, c, d)
+
+    encodedSize (a,b,c,d) = 1 + encodedSize a + encodedSize b + encodedSize c + encodedSize d
 
 instance Bi BS.ByteString where
     encode = E.encodeBytes
