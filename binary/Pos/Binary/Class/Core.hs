@@ -33,6 +33,7 @@ module Pos.Binary.Class.Core
 #include <MachDeps.h>
 
 import           Universum
+import           Foreign (sizeOf)
 import qualified GHC.Integer.GMP.Internals as Gmp
 import           GHC.Prim (int2Word#)
 import           GHC.Types (Int (..), Word (..))
@@ -256,6 +257,9 @@ instance Bi Int where
 instance Bi Float where
     encode = E.encodeFloat
     decode = D.decodeFloatCanonical
+
+    -- 1 byte header plus encoded @'Float'@.
+    encodedSize a = 1 + fromIntegral (sizeOf a)
 
 instance Bi Int32 where
     encode = E.encodeInt32
