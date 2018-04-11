@@ -370,6 +370,8 @@ instance Bi a => Bi [a] where
     encode = encodeList
     decode = decodeList
 
+    encodedSize = encodedListSize
+
 instance (Bi a, Bi b) => Bi (Either a b) where
     encode (Left  x) = E.encodeListLen 2 <> E.encodeWord 0 <> encode x
     encode (Right x) = E.encodeListLen 2 <> E.encodeWord 1 <> encode x
@@ -382,6 +384,8 @@ instance (Bi a, Bi b) => Bi (Either a b) where
                   1 -> do !x <- decode
                           return (Right x)
                   _ -> cborError $ "decode@Either: unknown tag " <> show t
+
+    encodedSize x = 2 + either encodedSize encodedSize x
 
 instance Bi a => Bi (NonEmpty a) where
     encode = defaultEncodeList . toList
